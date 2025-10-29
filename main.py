@@ -1,15 +1,17 @@
 import os
 import pandas as pd
 from modules.preprocessing import preprocess_text
-from modules.vectorization import vectorize_documents
-from modules.search import search_query
+from modules.indexing import create_search_index
+from modules.search import search_with_ranking
+from whoosh import index
 from tqdm import tqdm
 
-DATA_DIR = "datasets"   # folder berisi *.csv dari asisten lab
-CLEAN_DIR = "datasets_clean"  # folder untuk hasil preprocessing
+DATA_DIR = "datasets"
+CLEAN_DIR = "datasets_clean"
+INDEX_DIR = "indexdir"
+
 os.makedirs(CLEAN_DIR, exist_ok=True)
 
-# Kolom-kolom umum untuk konten & judul (opsional, judul akan ditampilkan)
 CANDIDATE_CONTENT_COLS = [
     "text", "content", "abstract", "abstrak", "isi", "body", "article",
     "judul_dan_isi", "clean_text", "dokumen", "teks"
@@ -31,10 +33,6 @@ def combine_title_content(row, title_col, content_col):
     return " - ".join(parts) if parts else ""
 
 def load_documents_from_csvs():
-    """
-    Baca semua CSV di DATA_DIR, lakukan preprocessing jika belum pernah dilakukan.
-    Simpan hasil preprocessing ke datasets_clean/ agar tidak perlu diulang.
-    """
     docs, meta, titles = [], [], []
 
     if not os.path.isdir(DATA_DIR):
@@ -50,16 +48,16 @@ def load_documents_from_csvs():
         dataset_name = os.path.splitext(csv_name)[0]
         clean_path = os.path.join(CLEAN_DIR, f"{dataset_name}_clean.csv")
 
-        # 🔹 Jika sudah pernah dipreprocess, langsung load
+        # Jika sudah ada, beritahu dan load langsung
         if os.path.exists(clean_path):
-            df_clean = pd.read_csv(clean_path)
+            df_clean = pd.read_csv(clean_path, sep=None, engine="python", on_bad_lines='skip')
             docs.extend(df_clean["clean_text"].tolist())
-            titles.extend(df_clean["title"].tolist())
+            titles.extend(df_clean["judul"].tolist())
             meta.extend(df_clean.to_dict("records"))
-            print(f"✅ Memuat hasil preprocessing lama: {clean_path}")
+            print(f"Memuat hasil preprocessing: {clean_path}")
             continue
 
-        # 🔹 Kalau belum ada, lakukan preprocessing
+        # Kalau belum ada, lakukan preprocessing dan simpan
         fpath = os.path.join(DATA_DIR, csv_name)
         try:
             try:
@@ -71,6 +69,10 @@ def load_documents_from_csvs():
             title_col = pick_first_existing(CANDIDATE_TITLE_COLS, df)
             content_col = pick_first_existing(CANDIDATE_CONTENT_COLS, df)
 
+            if not content_col:
+                print(f"Tidak ditemukan kolom teks di {csv_name}")
+                continue
+
             clean_records = []
             for i, row in tqdm(df.iterrows(), total=len(df), desc=f"Memproses {csv_name}"):
                 raw = combine_title_content(row, title_col, content_col).strip()
@@ -78,21 +80,21 @@ def load_documents_from_csvs():
                     continue
                 cleaned = preprocess_text(raw)
                 title = str(row[title_col]) if title_col and pd.notna(row.get(title_col)) else f"{dataset_name}_row{i}"
+                sumber = os.path.splitext(csv_name)[0]
                 docs.append(cleaned)
                 titles.append(title)
                 clean_records.append({
-                    "title": title,
+                    "judul": title,
                     "clean_text": cleaned,
                     "dataset": dataset_name,
                     "file": csv_name,
-                    "row_id": i
+                    "row_id": i,
+                    "sumber": sumber
                 })
 
-            # 🔹 Simpan hasil preprocessing
             df_clean = pd.DataFrame(clean_records)
             df_clean.to_csv(clean_path, index=False, encoding="utf-8")
-            print(f"✅ Hasil preprocessing disimpan ke: {clean_path}")
-
+            print(f"Hasil preprocessing disimpan ke: {clean_path}")
             meta.extend(clean_records)
 
         except Exception as e:
@@ -100,54 +102,54 @@ def load_documents_from_csvs():
 
     return docs, meta, titles
 
+def search_from_index(query):
+    if not os.path.exists(INDEX_DIR):
+        print("Index belum dibuat. Jalankan menu [1] dulu untuk membuat index.")
+        return
+
+    ix = index.open_dir(INDEX_DIR)
+    results = search_with_ranking(ix, query)
+
+    print("\n=== Hasil Pencarian ===")
+    if not results:
+        print("Tidak ada hasil ditemukan.")
+        print("=========================================================\n")
+        return
+
+    for rank, (judul, sumber, skor) in enumerate(results, start=1):
+        print(f"{rank}. {judul} (score: {skor:.4f})")
+        print(f"   Sumber: {sumber}\n")
+    print("=========================================================\n")
 
 def main():
     print("=== INFORMATION RETRIEVAL SYSTEM ===")
     print("[1] Load & Index Dataset (CSV)")
-    print("[2] Search Query")
+    print("[2] Search Query (Whoosh + Cosine)")
     print("[3] Exit")
     print("====================================")
-
-    docs, meta, titles = [], [], []
-    vectorizer = None
 
     while True:
         choice = input("Pilih menu: ").strip()
 
         if choice == "1":
-            docs, meta, titles = load_documents_from_csvs()
-            if not docs:
-                print("Dokumen tidak ditemukan / kosong.")
-                continue
-            _, vectorizer = vectorize_documents(docs)
-            print(f"{len(docs)} dokumen berhasil dimuat dan diproses dari CSV.\n")
+            print("Memproses dataset...")
+            load_documents_from_csvs()  # akan buat dataset bersih jika belum ada
+            create_search_index(data_dir=CLEAN_DIR, index_dir=INDEX_DIR)
+            print("\nDataset selesai diproses dan diindeks.\n")
 
         elif choice == "2":
-            if not docs or vectorizer is None:
-                print("Dataset belum dimuat. Pilih [1] dulu.")
-                continue
             query = input("Masukkan query: ").strip()
-            qproc = preprocess_text(query)
-
-            results = search_query(qproc, docs, vectorizer)
-
-            print("\n=== Hasil Pencarian (Top-5) ===")
-            if not results:
-                print("Tidak ada hasil.")
-            for rank, (idx, score) in enumerate(results, start=1):
-                title = titles[idx] if idx < len(titles) else "(Tanpa Judul)"
-                ds = meta[idx]["dataset"]
-                rid = meta[idx]["row_id"]
-                print(f"{rank}. {title} [{ds} - row#{rid}] | Skor: {score:.4f}")
-            print("================================\n")
+            if not query:
+                print("Query tidak boleh kosong.")
+                continue
+            search_from_index(query)
 
         elif choice == "3":
-            print("Udah Keluar Nichh...")
+            print("Keluar dari program.")
             break
 
         else:
-            print("Pilihan tidak valid.")
-
+            print("Pilihan tidak valid. Coba lagi.")
 
 if __name__ == "__main__":
     main()

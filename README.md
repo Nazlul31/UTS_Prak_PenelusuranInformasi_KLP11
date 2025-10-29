@@ -15,6 +15,7 @@ Sistem ini mampu melakukan **pencarian dan perankingan dokumen** dari berbagai s
 | 1 | Caesar Aidarus | 2308107010072 |
 | 2 | Muhammad Nazlul Ramadhyan | 2308107010036 |
 | 3 | Naufal Farel Syafilan | 2308107010058 |
+| 4 | Muhammad Sidqi Alfareza | 2308107010040 |
 
 ---
 
